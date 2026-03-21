@@ -10,6 +10,11 @@
 #include <vector>
 #include <iostream>
 #include <cmath>
+#include <algorithm>
+#include <cstring>
+#include <iomanip>
+#include <set>
+#include <sstream>
 // lib to read from file
 #include <fstream>
 // for the name of the computer and the logged in user
@@ -63,8 +68,8 @@ struct Proc
 
 struct IP4
 {
-    char *name;
-    char addressBuffer[INET_ADDRSTRLEN];
+    string name;
+    string address;
 };
 
 struct Networks
@@ -74,34 +79,113 @@ struct Networks
 
 struct TX
 {
-    int bytes;
-    int packets;
-    int errs;
-    int drop;
-    int fifo;
-    int frame;
-    int compressed;
-    int multicast;
+    unsigned long long bytes;
+    unsigned long long packets;
+    unsigned long long errs;
+    unsigned long long drop;
+    unsigned long long fifo;
+    unsigned long long colls;
+    unsigned long long carrier;
+    unsigned long long compressed;
 };
 
 struct RX
 {
-    int bytes;
-    int packets;
-    int errs;
-    int drop;
-    int fifo;
-    int colls;
-    int carrier;
-    int compressed;
+    unsigned long long bytes;
+    unsigned long long packets;
+    unsigned long long errs;
+    unsigned long long drop;
+    unsigned long long fifo;
+    unsigned long long frame;
+    unsigned long long compressed;
+    unsigned long long multicast;
 };
 
-// student TODO : system stats
+struct SystemIdentity
+{
+    string osName;
+    string userName;
+    string hostName;
+    string cpuName;
+};
+
+struct MemoryStats
+{
+    unsigned long long memTotalKB;
+    unsigned long long memUsedKB;
+    unsigned long long swapTotalKB;
+    unsigned long long swapUsedKB;
+};
+
+struct DiskStats
+{
+    unsigned long long totalBytes;
+    unsigned long long usedBytes;
+    unsigned long long freeBytes;
+};
+
+struct ProcessInfo
+{
+    int pid;
+    string name;
+    char state;
+    float cpuPercent;
+    float memoryPercent;
+    unsigned long long totalTimeTicks;
+};
+
+struct ProcessCounts
+{
+    int running;
+    int sleeping;
+    int uninterruptible;
+    int zombie;
+    int stopped;
+    int other;
+    int total;
+};
+
+struct FanInfo
+{
+    bool available;
+    string label;
+    string status;
+    int rpm;
+    int maxRpm;
+    float levelPercent;
+};
+
+struct ThermalInfo
+{
+    bool available;
+    string label;
+    float temperatureC;
+};
+
+struct NetworkEntry
+{
+    string name;
+    string ipv4;
+    RX rx;
+    TX tx;
+};
+
 string CPUinfo();
-const char *getOsName();
+string getOsName();
+SystemIdentity getSystemIdentity();
+CPUStats readCPUStats();
+float calculateCPUUsage(const CPUStats &previous, const CPUStats &current);
+ProcessCounts getProcessCounts();
+FanInfo getFanInfo();
+ThermalInfo getThermalInfo();
 
-// student TODO : memory and processes
+MemoryStats getMemoryStats();
+DiskStats getDiskStats(const char *path = "/");
+vector<ProcessInfo> getProcesses(unsigned long long totalCpuTicksDelta, const map<int, unsigned long long> &previousTicks, unsigned long long memTotalKB);
 
-// student TODO : network
+Networks getIPv4Addresses();
+vector<NetworkEntry> getNetworkEntries();
+string formatBytes(unsigned long long bytes);
+float bytesToDisplayScale(unsigned long long bytes, float maxDisplayGB = 2.0f);
 
 #endif

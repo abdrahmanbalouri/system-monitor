@@ -41,39 +41,424 @@ using namespace gl;
 #include IMGUI_IMPL_OPENGL_LOADER_CUSTOM
 #endif
 
+namespace
+{
+struct GraphState
+{
+    vector<float> values;
+    bool paused;
+    float fps;
+    float yScale;
+    Uint64 lastUpdateTicks;
+
+    GraphState() : values(120, 0.0f), paused(false), fps(20.0f), yScale(100.0f), lastUpdateTicks(0) {}
+};
+
+string formatPercent(float value)
+{
+    ostringstream output;
+    output << fixed << setprecision(1) << value << "%";
+    return output.str();
+}
+
+string formatState(char state)
+{
+    switch (state)
+    {
+    case 'R':
+        return "Running";
+    case 'S':
+        return "Sleeping";
+    case 'D':
+        return "Uninterruptible";
+    case 'Z':
+        return "Zombie";
+    case 'T':
+    case 't':
+        return "Stopped";
+    case 'I':
+        return "Idle";
+    default:
+        return string(1, state);
+    }
+}
+
+void pushGraphValue(GraphState &graph, float value)
+{
+    const Uint64 now = SDL_GetTicks64();
+    const double intervalMs = 1000.0 / max(1.0f, graph.fps);
+    if (!graph.paused && (graph.lastUpdateTicks == 0 || static_cast<double>(now - graph.lastUpdateTicks) >= intervalMs))
+    {
+        graph.lastUpdateTicks = now;
+        graph.values.erase(graph.values.begin());
+        graph.values.push_back(value);
+    }
+}
+
+void renderMetricCard(const char *label, const string &value, float ratio, ImVec2 size)
+{
+    ratio = max(0.0f, min(1.0f, ratio));
+    ImGui::BeginChild(label, size, true);
+    ImGui::Text("%s", label);
+    ImGui::Spacing();
+    ImGui::ProgressBar(ratio, ImVec2(-1.0f, 18.0f), value.c_str());
+    ImGui::EndChild();
+}
+
+void renderGraphControls(GraphState &graph, const char *pauseLabel, float minScale, float maxScale)
+{
+    ImGui::Checkbox(pauseLabel, &graph.paused);
+    ImGui::SameLine();
+    ImGui::SliderFloat("FPS", &graph.fps, 1.0f, 60.0f, "%.0f");
+    ImGui::SliderFloat("Y Scale", &graph.yScale, minScale, maxScale, "%.0f");
+}
+
+void renderPlot(const char *label, GraphState &graph, const string &overlay, ImVec2 size)
+{
+    ImGui::PlotLines(label, graph.values.data(), static_cast<int>(graph.values.size()), 0, overlay.c_str(), 0.0f, graph.yScale, size);
+}
+
+void renderSummaryRow(const char *label, const string &value)
+{
+    ImGui::Text("%s", label);
+    ImGui::SameLine(170.0f);
+    ImGui::TextColored(ImVec4(0.70f, 0.85f, 1.0f, 1.0f), "%s", value.c_str());
+}
+
+bool filterMatches(const ProcessInfo &process, const string &needle)
+{
+    if (needle.empty())
+        return true;
+
+    string pid = to_string(process.pid);
+    string haystack = process.name + " " + pid + " " + formatState(process.state);
+    string loweredHaystack = haystack;
+    string loweredNeedle = needle;
+    transform(loweredHaystack.begin(), loweredHaystack.end(), loweredHaystack.begin(), ::tolower);
+    transform(loweredNeedle.begin(), loweredNeedle.end(), loweredNeedle.begin(), ::tolower);
+    return loweredHaystack.find(loweredNeedle) != string::npos;
+}
+
+void renderSystemGraphs()
+{
+    static CPUStats previousStats = readCPUStats();
+    static GraphState cpuGraph;
+    static GraphState fanGraph;
+    static GraphState thermalGraph;
+
+    const CPUStats currentStats = readCPUStats();
+    const float cpuUsage = calculateCPUUsage(previousStats, currentStats);
+    previousStats = currentStats;
+
+    const FanInfo fan = getFanInfo();
+    const ThermalInfo thermal = getThermalInfo();
+
+    if (ImGui::BeginTabBar("system-tabs"))
+    {
+        if (ImGui::BeginTabItem("CPU"))
+        {
+            pushGraphValue(cpuGraph, cpuUsage);
+            renderGraphControls(cpuGraph, "Pause CPU", 25.0f, 100.0f);
+            renderPlot("##cpu-plot", cpuGraph, "CPU " + formatPercent(cpuUsage), ImVec2(-1.0f, 180.0f));
+            ImGui::EndTabItem();
+        }
+
+        if (ImGui::BeginTabItem("Fan"))
+        {
+            const float fanValue = fan.available ? static_cast<float>(fan.rpm) : 0.0f;
+            pushGraphValue(fanGraph, fanValue);
+            renderGraphControls(fanGraph, "Pause Fan", 500.0f, 6000.0f);
+            renderSummaryRow("Status", fan.status);
+            renderSummaryRow("Speed", fan.available ? to_string(fan.rpm) + " RPM" : "N/A");
+            renderSummaryRow("Level", fan.available ? formatPercent(fan.levelPercent) : "N/A");
+            renderPlot("##fan-plot", fanGraph, fan.available ? to_string(fan.rpm) + " RPM" : "No sensor", ImVec2(-1.0f, 150.0f));
+            ImGui::EndTabItem();
+        }
+
+        if (ImGui::BeginTabItem("Thermal"))
+        {
+            const float temperature = thermal.available ? thermal.temperatureC : 0.0f;
+            pushGraphValue(thermalGraph, temperature);
+            renderGraphControls(thermalGraph, "Pause Thermal", 30.0f, 120.0f);
+            renderSummaryRow("Sensor", thermal.available ? thermal.label : "N/A");
+            renderSummaryRow("Current", thermal.available ? to_string(static_cast<int>(thermal.temperatureC)) + " C" : "N/A");
+            renderPlot("##thermal-plot", thermalGraph, thermal.available ? to_string(static_cast<int>(thermal.temperatureC)) + " C" : "No sensor", ImVec2(-1.0f, 150.0f));
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+}
+
+void renderProcessTable(unsigned long long memTotalKB)
+{
+    static CPUStats previousStats = readCPUStats();
+    static map<int, unsigned long long> previousProcessTicks;
+    static set<int> selectedPids;
+    static char filterBuffer[128] = "";
+
+    const CPUStats currentStats = readCPUStats();
+    const unsigned long long previousTotal = previousStats.user + previousStats.nice + previousStats.system + previousStats.idle + previousStats.iowait + previousStats.irq + previousStats.softirq + previousStats.steal;
+    const unsigned long long currentTotal = currentStats.user + currentStats.nice + currentStats.system + currentStats.idle + currentStats.iowait + currentStats.irq + currentStats.softirq + currentStats.steal;
+    const unsigned long long totalDelta = currentTotal > previousTotal ? currentTotal - previousTotal : 0;
+
+    vector<ProcessInfo> processes = getProcesses(totalDelta, previousProcessTicks, memTotalKB);
+    previousStats = currentStats;
+    previousProcessTicks.clear();
+    for (size_t i = 0; i < processes.size(); ++i)
+        previousProcessTicks[processes[i].pid] = processes[i].totalTimeTicks;
+
+    ImGui::InputTextWithHint("##process-filter", "Filter by PID, name or state", filterBuffer, sizeof(filterBuffer));
+    const string filterText = filterBuffer;
+
+    ImGuiTableFlags flags = ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY;
+    if (ImGui::BeginTable("process-table", 5, flags, ImVec2(0.0f, 255.0f)))
+    {
+        ImGui::TableSetupColumn("PID");
+        ImGui::TableSetupColumn("Name");
+        ImGui::TableSetupColumn("State");
+        ImGui::TableSetupColumn("CPU Usage");
+        ImGui::TableSetupColumn("Memory Usage");
+        ImGui::TableHeadersRow();
+
+        for (size_t index = 0; index < processes.size(); ++index)
+        {
+            const ProcessInfo &process = processes[index];
+            if (!filterMatches(process, filterText))
+                continue;
+
+            const bool isSelected = selectedPids.count(process.pid) > 0;
+            ImGui::PushID(process.pid);
+            ImGui::TableNextRow();
+
+            ImGui::TableSetColumnIndex(0);
+            if (ImGui::Selectable(to_string(process.pid).c_str(), isSelected, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowItemOverlap))
+            {
+                if (ImGui::GetIO().KeyCtrl)
+                {
+                    if (isSelected)
+                        selectedPids.erase(process.pid);
+                    else
+                        selectedPids.insert(process.pid);
+                }
+                else
+                {
+                    selectedPids.clear();
+                    selectedPids.insert(process.pid);
+                }
+            }
+
+            ImGui::TableSetColumnIndex(1);
+            ImGui::Text("%s", process.name.c_str());
+            ImGui::TableSetColumnIndex(2);
+            ImGui::Text("%s", formatState(process.state).c_str());
+            ImGui::TableSetColumnIndex(3);
+            ImGui::Text("%s", formatPercent(process.cpuPercent).c_str());
+            ImGui::TableSetColumnIndex(4);
+            ImGui::Text("%s", formatPercent(process.memoryPercent).c_str());
+            ImGui::PopID();
+        }
+
+        ImGui::EndTable();
+    }
+}
+
+void renderNetworkTables(const vector<NetworkEntry> &entries)
+{
+    if (ImGui::BeginTabBar("network-tables"))
+    {
+        if (ImGui::BeginTabItem("RX"))
+        {
+            if (ImGui::BeginTable("rx-table", 9, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders))
+            {
+                ImGui::TableSetupColumn("Interface");
+                ImGui::TableSetupColumn("Bytes");
+                ImGui::TableSetupColumn("Packets");
+                ImGui::TableSetupColumn("Errs");
+                ImGui::TableSetupColumn("Drop");
+                ImGui::TableSetupColumn("Fifo");
+                ImGui::TableSetupColumn("Frame");
+                ImGui::TableSetupColumn("Compressed");
+                ImGui::TableSetupColumn("Multicast");
+                ImGui::TableHeadersRow();
+
+                for (size_t i = 0; i < entries.size(); ++i)
+                {
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    ImGui::Text("%s", entries[i].name.c_str());
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::Text("%s", formatBytes(entries[i].rx.bytes).c_str());
+                    ImGui::TableSetColumnIndex(2);
+                    ImGui::Text("%llu", entries[i].rx.packets);
+                    ImGui::TableSetColumnIndex(3);
+                    ImGui::Text("%llu", entries[i].rx.errs);
+                    ImGui::TableSetColumnIndex(4);
+                    ImGui::Text("%llu", entries[i].rx.drop);
+                    ImGui::TableSetColumnIndex(5);
+                    ImGui::Text("%llu", entries[i].rx.fifo);
+                    ImGui::TableSetColumnIndex(6);
+                    ImGui::Text("%llu", entries[i].rx.frame);
+                    ImGui::TableSetColumnIndex(7);
+                    ImGui::Text("%llu", entries[i].rx.compressed);
+                    ImGui::TableSetColumnIndex(8);
+                    ImGui::Text("%llu", entries[i].rx.multicast);
+                }
+                ImGui::EndTable();
+            }
+            ImGui::EndTabItem();
+        }
+
+        if (ImGui::BeginTabItem("TX"))
+        {
+            if (ImGui::BeginTable("tx-table", 9, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders))
+            {
+                ImGui::TableSetupColumn("Interface");
+                ImGui::TableSetupColumn("Bytes");
+                ImGui::TableSetupColumn("Packets");
+                ImGui::TableSetupColumn("Errs");
+                ImGui::TableSetupColumn("Drop");
+                ImGui::TableSetupColumn("Fifo");
+                ImGui::TableSetupColumn("Colls");
+                ImGui::TableSetupColumn("Carrier");
+                ImGui::TableSetupColumn("Compressed");
+                ImGui::TableHeadersRow();
+
+                for (size_t i = 0; i < entries.size(); ++i)
+                {
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    ImGui::Text("%s", entries[i].name.c_str());
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::Text("%s", formatBytes(entries[i].tx.bytes).c_str());
+                    ImGui::TableSetColumnIndex(2);
+                    ImGui::Text("%llu", entries[i].tx.packets);
+                    ImGui::TableSetColumnIndex(3);
+                    ImGui::Text("%llu", entries[i].tx.errs);
+                    ImGui::TableSetColumnIndex(4);
+                    ImGui::Text("%llu", entries[i].tx.drop);
+                    ImGui::TableSetColumnIndex(5);
+                    ImGui::Text("%llu", entries[i].tx.fifo);
+                    ImGui::TableSetColumnIndex(6);
+                    ImGui::Text("%llu", entries[i].tx.colls);
+                    ImGui::TableSetColumnIndex(7);
+                    ImGui::Text("%llu", entries[i].tx.carrier);
+                    ImGui::TableSetColumnIndex(8);
+                    ImGui::Text("%llu", entries[i].tx.compressed);
+                }
+                ImGui::EndTable();
+            }
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+}
+
+void renderNetworkUsage(const vector<NetworkEntry> &entries)
+{
+    if (ImGui::BeginTabBar("network-usage"))
+    {
+        if (ImGui::BeginTabItem("RX Usage"))
+        {
+            for (size_t i = 0; i < entries.size(); ++i)
+            {
+                const string label = entries[i].name + " RX";
+                ImGui::Text("%s", label.c_str());
+                ImGui::ProgressBar(bytesToDisplayScale(entries[i].rx.bytes), ImVec2(-1.0f, 16.0f), formatBytes(entries[i].rx.bytes).c_str());
+            }
+            ImGui::EndTabItem();
+        }
+
+        if (ImGui::BeginTabItem("TX Usage"))
+        {
+            for (size_t i = 0; i < entries.size(); ++i)
+            {
+                const string label = entries[i].name + " TX";
+                ImGui::Text("%s", label.c_str());
+                ImGui::ProgressBar(bytesToDisplayScale(entries[i].tx.bytes), ImVec2(-1.0f, 16.0f), formatBytes(entries[i].tx.bytes).c_str());
+            }
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+}
+}
+
 // systemWindow, display information for the system monitorization
 void systemWindow(const char *id, ImVec2 size, ImVec2 position)
 {
-    ImGui::Begin(id);
-    ImGui::SetWindowSize(id, size);
-    ImGui::SetWindowPos(id, position);
+    ImGui::SetNextWindowSize(size, ImGuiCond_Always);
+    ImGui::SetNextWindowPos(position, ImGuiCond_Always);
+    ImGui::Begin(id, NULL, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
 
-    // student TODO : add code here for the system window
+    const SystemIdentity identity = getSystemIdentity();
+    const ProcessCounts counts = getProcessCounts();
 
+    renderSummaryRow("Operating System", identity.osName);
+    renderSummaryRow("User", identity.userName);
+    renderSummaryRow("Hostname", identity.hostName);
+    renderSummaryRow("CPU", identity.cpuName);
+    ImGui::Separator();
+
+    ImGui::Columns(2, "process-state-columns", false);
+    renderSummaryRow("Total Tasks", to_string(counts.total));
+    renderSummaryRow("Sleeping", to_string(counts.sleeping));
+    renderSummaryRow("Running", to_string(counts.running));
+    renderSummaryRow("Uninterruptible", to_string(counts.uninterruptible));
+    ImGui::NextColumn();
+    renderSummaryRow("Zombie", to_string(counts.zombie));
+    renderSummaryRow("Stopped/Traced", to_string(counts.stopped));
+    renderSummaryRow("Other", to_string(counts.other));
+    ImGui::Columns(1);
+    ImGui::Separator();
+
+    renderSystemGraphs();
     ImGui::End();
 }
 
 // memoryProcessesWindow, display information for the memory and processes information
 void memoryProcessesWindow(const char *id, ImVec2 size, ImVec2 position)
 {
-    ImGui::Begin(id);
-    ImGui::SetWindowSize(id, size);
-    ImGui::SetWindowPos(id, position);
+    ImGui::SetNextWindowSize(size, ImGuiCond_Always);
+    ImGui::SetNextWindowPos(position, ImGuiCond_Always);
+    ImGui::Begin(id, NULL, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
 
-    // student TODO : add code here for the memory and process information
+    const MemoryStats memory = getMemoryStats();
+    const DiskStats disk = getDiskStats("/");
 
+    const float memRatio = memory.memTotalKB > 0 ? static_cast<float>(memory.memUsedKB) / memory.memTotalKB : 0.0f;
+    const float swapRatio = memory.swapTotalKB > 0 ? static_cast<float>(memory.swapUsedKB) / memory.swapTotalKB : 0.0f;
+    const float diskRatio = disk.totalBytes > 0 ? static_cast<float>(disk.usedBytes) / disk.totalBytes : 0.0f;
+
+    renderMetricCard("RAM", formatBytes(memory.memUsedKB * 1024ULL) + " / " + formatBytes(memory.memTotalKB * 1024ULL), memRatio, ImVec2(0.0f, 62.0f));
+    renderMetricCard("SWAP", formatBytes(memory.swapUsedKB * 1024ULL) + " / " + formatBytes(memory.swapTotalKB * 1024ULL), swapRatio, ImVec2(0.0f, 62.0f));
+    renderMetricCard("Disk", formatBytes(disk.usedBytes) + " / " + formatBytes(disk.totalBytes), diskRatio, ImVec2(0.0f, 62.0f));
+
+    ImGui::Spacing();
+    ImGui::Text("Processes");
+    renderProcessTable(memory.memTotalKB);
     ImGui::End();
 }
 
 // network, display information network information
 void networkWindow(const char *id, ImVec2 size, ImVec2 position)
 {
-    ImGui::Begin(id);
-    ImGui::SetWindowSize(id, size);
-    ImGui::SetWindowPos(id, position);
+    ImGui::SetNextWindowSize(size, ImGuiCond_Always);
+    ImGui::SetNextWindowPos(position, ImGuiCond_Always);
+    ImGui::Begin(id, NULL, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
 
-    // student TODO : add code here for the network information
+    const vector<NetworkEntry> entries = getNetworkEntries();
+    const Networks addresses = getIPv4Addresses();
 
+    ImGui::Text("IPv4 Addresses");
+    for (size_t i = 0; i < addresses.ip4s.size(); ++i)
+        ImGui::BulletText("%s: %s", addresses.ip4s[i].name.c_str(), addresses.ip4s[i].address.c_str());
+    if (addresses.ip4s.empty())
+        ImGui::Text("No IPv4 interfaces detected.");
+
+    ImGui::Separator();
+    renderNetworkTables(entries);
+    ImGui::Separator();
+    renderNetworkUsage(entries);
     ImGui::End();
 }
 
@@ -101,7 +486,7 @@ int main(int, char **)
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
     SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
     SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
-    SDL_Window *window = SDL_CreateWindow("Dear ImGui SDL2+OpenGL3 example", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720, window_flags);
+    SDL_Window *window = SDL_CreateWindow("System Monitor", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720, window_flags);
     SDL_GLContext gl_context = SDL_GL_CreateContext(window);
     SDL_GL_MakeCurrent(window, gl_context);
     SDL_GL_SetSwapInterval(1); // Enable vsync
@@ -138,6 +523,22 @@ int main(int, char **)
 
     // Setup Dear ImGui style
     ImGui::StyleColorsDark();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+
+    ImGuiStyle &style = ImGui::GetStyle();
+    style.WindowRounding = 8.0f;
+    style.FrameRounding = 6.0f;
+    style.GrabRounding = 6.0f;
+    style.TabRounding = 6.0f;
+    style.Colors[ImGuiCol_WindowBg] = ImVec4(0.07f, 0.08f, 0.11f, 1.0f);
+    style.Colors[ImGuiCol_TitleBg] = ImVec4(0.12f, 0.16f, 0.22f, 1.0f);
+    style.Colors[ImGuiCol_TitleBgActive] = ImVec4(0.15f, 0.22f, 0.30f, 1.0f);
+    style.Colors[ImGuiCol_Header] = ImVec4(0.17f, 0.30f, 0.42f, 0.70f);
+    style.Colors[ImGuiCol_HeaderHovered] = ImVec4(0.23f, 0.42f, 0.55f, 0.90f);
+    style.Colors[ImGuiCol_Button] = ImVec4(0.18f, 0.36f, 0.48f, 0.75f);
+    style.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.22f, 0.48f, 0.63f, 0.95f);
+    style.Colors[ImGuiCol_PlotLines] = ImVec4(0.52f, 0.84f, 0.88f, 1.0f);
+    style.Colors[ImGuiCol_PlotHistogram] = ImVec4(0.93f, 0.67f, 0.26f, 1.0f);
 
     // Setup Platform/Renderer backends
     ImGui_ImplSDL2_InitForOpenGL(window, gl_context);
