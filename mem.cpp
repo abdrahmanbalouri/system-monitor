@@ -11,12 +11,14 @@ unsigned long long parseValueKB(const map<string, unsigned long long> &values, c
 }
 
 char parseProcessState(const string &line, string &name, unsigned long long &utime, unsigned long long &stime, long long &rssPages)
-{
+{ 
+   // std::cout <<  line;
     const size_t leftParen = line.find('(');
     const size_t rightParen = line.rfind(')');
     if (leftParen == string::npos || rightParen == string::npos || rightParen <= leftParen)
         return '?';
-
+   //   "ddqd(qsdqsdqsdq)qsdqs"
+   //        4          15   
     name = line.substr(leftParen + 1, rightParen - leftParen - 1);
     if (rightParen + 2 >= line.size())
         return '?';
@@ -27,10 +29,10 @@ char parseProcessState(const string &line, string &name, unsigned long long &uti
 
     for (int field = 4; field <= 13; ++field)
         rest >> ignored;
-    rest >> utime >> stime;
+       rest >> utime >> stime;
     for (int field = 16; field <= 23; ++field)
         rest >> ignored;
-    rest >> rssPages;
+      rest >> rssPages;
 
     return state;
 }

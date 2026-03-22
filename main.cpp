@@ -193,7 +193,6 @@ void renderProcessTable(unsigned long long memTotalKB)
 {
     static CPUStats previousStats = readCPUStats();
     static map<int, unsigned long long> previousProcessTicks;
-    static set<int> selectedPids;
     static char filterBuffer[128] = "";
 
     const CPUStats currentStats = readCPUStats();
@@ -226,38 +225,23 @@ void renderProcessTable(unsigned long long memTotalKB)
             if (!filterMatches(process, filterText))
                 continue;
 
-            const bool isSelected = selectedPids.count(process.pid) > 0;
-            ImGui::PushID(process.pid);
             ImGui::TableNextRow();
 
             ImGui::TableSetColumnIndex(0);
-            if (ImGui::Selectable(to_string(process.pid).c_str(), isSelected, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowItemOverlap))
-            {
-                if (ImGui::GetIO().KeyCtrl)
-                {
-                    if (isSelected)
-                        selectedPids.erase(process.pid);
-                    else
-                        selectedPids.insert(process.pid);
-                }
-                else
-                {
-                    selectedPids.clear();
-                    selectedPids.insert(process.pid);
-                }
-            }
+            ImGui::Text("%d", process.pid); 
 
             ImGui::TableSetColumnIndex(1);
             ImGui::Text("%s", process.name.c_str());
+
             ImGui::TableSetColumnIndex(2);
             ImGui::Text("%s", formatState(process.state).c_str());
+
             ImGui::TableSetColumnIndex(3);
             ImGui::Text("%s", formatPercent(process.cpuPercent).c_str());
+
             ImGui::TableSetColumnIndex(4);
             ImGui::Text("%s", formatPercent(process.memoryPercent).c_str());
-            ImGui::PopID();
         }
-
         ImGui::EndTable();
     }
 }
