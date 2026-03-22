@@ -521,25 +521,6 @@ int main(int, char **)
     // render bindings
     ImGuiIO &io = ImGui::GetIO();
 
-    // Setup Dear ImGui style
-    ImGui::StyleColorsDark();
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-
-    ImGuiStyle &style = ImGui::GetStyle();
-    style.WindowRounding = 8.0f;
-    style.FrameRounding = 6.0f;
-    style.GrabRounding = 6.0f;
-    style.TabRounding = 6.0f;
-    style.Colors[ImGuiCol_WindowBg] = ImVec4(0.07f, 0.08f, 0.11f, 1.0f);
-    style.Colors[ImGuiCol_TitleBg] = ImVec4(0.12f, 0.16f, 0.22f, 1.0f);
-    style.Colors[ImGuiCol_TitleBgActive] = ImVec4(0.15f, 0.22f, 0.30f, 1.0f);
-    style.Colors[ImGuiCol_Header] = ImVec4(0.17f, 0.30f, 0.42f, 0.70f);
-    style.Colors[ImGuiCol_HeaderHovered] = ImVec4(0.23f, 0.42f, 0.55f, 0.90f);
-    style.Colors[ImGuiCol_Button] = ImVec4(0.18f, 0.36f, 0.48f, 0.75f);
-    style.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.22f, 0.48f, 0.63f, 0.95f);
-    style.Colors[ImGuiCol_PlotLines] = ImVec4(0.52f, 0.84f, 0.88f, 1.0f);
-    style.Colors[ImGuiCol_PlotHistogram] = ImVec4(0.93f, 0.67f, 0.26f, 1.0f);
-
     // Setup Platform/Renderer backends
     ImGui_ImplSDL2_InitForOpenGL(window, gl_context);
     ImGui_ImplOpenGL3_Init(glsl_version);
